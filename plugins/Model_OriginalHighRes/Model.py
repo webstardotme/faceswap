@@ -41,19 +41,26 @@ mswindows = sys.platform=="win32"
 
 class EncoderType(enum.Enum):
     ORIGINAL = "original"
-    SHAOANLU = "shaoanlu"    
+    SHAOANLU = "shaoanlu"
+    
+    
+class LossFunction(enum.Enum):
+    MEAN_ABSOLUTE_ERROR = "mae"
+    DSSIM = "DSSIM"        
             
 
 def inst_norm():
     return InstanceNormalization()
 
 
+LOSS_FN = LossFunction.MEAN_ABSOLUTE_ERROR
 ENCODER = EncoderType.ORIGINAL
 
 
 hdf = {'encoderH5': 'encoder_{version_str}{ENCODER.value}.h5'.format(**vars()),
        'decoder_AH5': 'decoder_A_{version_str}{ENCODER.value}.h5'.format(**vars()),
        'decoder_BH5': 'decoder_B_{version_str}{ENCODER.value}.h5'.format(**vars())}
+
 
 class Model():
     
@@ -68,18 +75,16 @@ class Model():
     
     
     def __init__(self, model_dir, gpus, encoder_type=ENCODER):
-                
+
+        self._encoder_type = encoder_type        
+        self._model_dir = model_dir    
+        # can't chnage gpu's when the model is initialized no point in making it r/w
+        self._gpus = gpus 
+        
         if mswindows:  
             from ctypes import cdll    
             mydll = cdll.LoadLibrary("user32.dll")
-            mydll.SetProcessDPIAware(True)                               
-        
-        self._encoder_type = encoder_type
-        
-        self.model_dir = model_dir
-        
-        # can't chnage gpu's when the model is initialized no point in making it r/w
-        self._gpus = gpus 
+            mydll.SetProcessDPIAware(True)           
         
         Encoder = getattr(self, "Encoder_{}".format(self._encoder_type.value))
         Decoder = getattr(self, "Decoder_{}".format(self._encoder_type.value))
@@ -103,9 +108,14 @@ class Model():
             self.autoencoder_A = multi_gpu_model( self.autoencoder_A , self.gpus)
             self.autoencoder_B = multi_gpu_model( self.autoencoder_B , self.gpus)
         
-        
-        self.autoencoder_A.compile(optimizer=optimizer, loss='mean_absolute_error')
-        self.autoencoder_B.compile(optimizer=optimizer, loss='mean_absolute_error')                    
+        if LOSS_FN is LossFunction.MEAN_ABSOLUTE_ERROR:
+            self.autoencoder_A.compile(optimizer=optimizer, loss='mean_absolute_error')
+            self.autoencoder_B.compile(optimizer=optimizer, loss='mean_absolute_error')
+            
+        elif LOSS_FN is LossFunction.DSSIM:
+            from keras_contrib.losses.dssim import DSSIMObjective
+            self.autoencoder_A.compile(optimizer=optimizer, loss=DSSIMObjective(), metrics=['mse'])
+            self.autoencoder_B.compile(optimizer=optimizer, loss=DSSIMObjective(), metrics=['mse'])
         
         
     def load(self, swapped):        
@@ -277,7 +287,7 @@ class Model():
         print('\nsaving model weights', end='', flush=True)        
         
         from concurrent.futures import ThreadPoolExecutor, as_completed        
-        
+        # thought maybe I/O bound, sometimes saving in parallel is faster
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = [executor.submit(getattr(self, mdl_name.rstrip('H5')).save_weights, str(self.model_dir / mdl_H5_fn)) for mdl_name, mdl_H5_fn in hdf.items()]
             for future in as_completed(futures):
@@ -290,6 +300,10 @@ class Model():
     @property
     def gpus(self):
         return self._gpus
+    
+    @property
+    def model_dir(self):
+        return self._model_dir    
     
     @property
     def model_name(self):
